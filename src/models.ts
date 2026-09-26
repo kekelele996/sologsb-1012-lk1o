@@ -33,11 +33,60 @@ export interface CourseModule {
   steps: LessonStep[];
 }
 
+export type CourseSnapshot = Omit<CourseProject, 'frozenVersions'>;
+
 export interface FrozenVersion {
   id: string;
   label: string;
   createdAt: string;
-  snapshot: Omit<CourseProject, 'frozenVersions'>;
+  snapshot: CourseSnapshot;
+}
+
+export const CURRENT_VERSION_ID = 'current-working-copy';
+
+export interface VersionSummary {
+  id: string;
+  label: string;
+  createdAt: string;
+  status: CourseStatus;
+  modules: CourseModule[];
+  moduleCount: number;
+  stepCount: number;
+  current: boolean;
+}
+
+export interface FieldChange {
+  field: string;
+  label: string;
+  before: string;
+  after: string;
+}
+
+export interface ModuleDiff {
+  moduleId: string;
+  title: string;
+  kind: 'added' | 'missing';
+  stepCount: number;
+  steps: Array<{ id: string; title: string }>;
+}
+
+export interface StepDiff {
+  moduleId: string;
+  moduleTitle: string;
+  stepId: string;
+  title: string;
+  kind: 'added' | 'missing' | 'changed';
+  fields: FieldChange[];
+}
+
+export interface VersionDiff {
+  addedModules: ModuleDiff[];
+  missingModules: ModuleDiff[];
+  steps: StepDiff[];
+  addedStepCount: number;
+  missingStepCount: number;
+  changedStepCount: number;
+  empty: boolean;
 }
 
 export interface CourseProject {
@@ -253,4 +302,190 @@ export function validateProject(project: CourseProject): ValidationCheck[] {
 
 export function cloneProject(project: CourseProject): CourseProject {
   return structuredClone(project);
+}
+
+const STEP_FIELD_LABELS: Array<{ field: keyof LessonStep; label: string }> = [
+  { field: 'title', label: '步骤标题' },
+  { field: 'kind', label: '步骤类型' },
+  { field: 'difficulty', label: '难度标签' },
+  { field: 'duration', label: '预计时长（秒）' },
+  { field: 'demoTitle', label: '示范片段名称' },
+  { field: 'demoUrl', label: '本地素材地址' },
+  { field: 'handshape', label: '手形说明' },
+  { field: 'gestureZone', label: '主要手形区域' },
+  { field: 'caption', label: '步骤字幕' },
+  { field: 'captionPosition', label: '字幕位置' },
+  { field: 'camera', label: '镜头角度' },
+  { field: 'altText', label: '替代文本' },
+  { field: 'prerequisiteId', label: '前置条件' },
+  { field: 'commonMistakes', label: '常见错误' },
+  { field: 'exercise', label: '练习任务' },
+  { field: 'exerciseFeedback', label: '练习反馈' },
+  { field: 'cuePoints', label: '检查点' },
+];
+
+function summarizeSnapshot(id: string, label: string, createdAt: string, status: CourseStatus, modules: CourseModule[], current: boolean): VersionSummary {
+  return {
+    id,
+    label,
+    createdAt,
+    status,
+    modules,
+    moduleCount: modules.length,
+    stepCount: modules.reduce((sum, module) => sum + module.steps.length, 0),
+    current,
+  };
+}
+
+export function getVersionSummaries(project: CourseProject): VersionSummary[] {
+  const current = summarizeSnapshot(CURRENT_VERSION_ID, '当前编辑稿', project.lastSavedAt, project.status, project.modules, true);
+  const frozen = project.frozenVersions.map((version) => summarizeSnapshot(version.id, version.label, version.createdAt, 'frozen', version.snapshot.modules, false));
+  return [current, ...frozen];
+}
+
+export function getVersionSnapshot(project: CourseProject, versionId: string): CourseSnapshot {
+  if (versionId === CURRENT_VERSION_ID) {
+    const { frozenVersions: _frozenVersions, ...snapshot } = project;
+    return snapshot;
+  }
+  return project.frozenVersions.find((version) => version.id === versionId)?.snapshot ?? getVersionSnapshot(project, CURRENT_VERSION_ID);
+}
+
+export function getVersionLabel(project: CourseProject, versionId: string): string {
+  if (versionId === CURRENT_VERSION_ID) return '当前编辑稿';
+  return project.frozenVersions.find((version) => version.id === versionId)?.label ?? '未知版本';
+}
+
+function resolveStep(modules: CourseModule[], stepId: string): LessonStep | undefined {
+  for (const module of modules) {
+    const step = module.steps.find((item) => item.id === stepId);
+    if (step) return step;
+  }
+  return undefined;
+}
+
+function formatStepValue(field: keyof LessonStep, allModules: CourseModule[], value: unknown): string {
+  if (field === 'prerequisiteId') {
+    const id = value as string;
+    if (!id) return '无前置条件';
+    return resolveStep(allModules, id)?.title ?? '指向已删除步骤';
+  }
+  if (field === 'duration') return `${String(value)} 秒`;
+  if (field === 'cuePoints') {
+    const points = value as number[];
+    return points.length ? points.map((point) => `${point}s`).join('、') : '无检查点';
+  }
+  if (field === 'commonMistakes') {
+    const mistakes = value as string[];
+    return mistakes.length ? mistakes.join('；') : '未记录';
+  }
+  const text = String(value ?? '').trim();
+  return text || '（空）';
+}
+
+/**
+ * 比较两个版本：base 视为“旧版本”，target 视为“新版本”。
+ * 新增 = target 有而 base 没有；缺失 = base 有而 target 没有。
+ */
+export function diffVersions(base: CourseSnapshot, target: CourseSnapshot): VersionDiff {
+  const baseModuleMap = new Map(base.modules.map((module) => [module.id, module]));
+  const targetModuleMap = new Map(target.modules.map((module) => [module.id, module]));
+
+  const addedModules: ModuleDiff[] = target.modules
+    .filter((module) => !baseModuleMap.has(module.id))
+    .map((module) => ({
+      moduleId: module.id,
+      title: module.title,
+      kind: 'added',
+      stepCount: module.steps.length,
+      steps: module.steps.map((step) => ({ id: step.id, title: step.title })),
+    }));
+
+  const missingModules: ModuleDiff[] = base.modules
+    .filter((module) => !targetModuleMap.has(module.id))
+    .map((module) => ({
+      moduleId: module.id,
+      title: module.title,
+      kind: 'missing',
+      stepCount: module.steps.length,
+      steps: module.steps.map((step) => ({ id: step.id, title: step.title })),
+    }));
+
+  const steps: StepDiff[] = [];
+  target.modules.forEach((targetModule) => {
+    const baseModule = baseModuleMap.get(targetModule.id);
+    if (!baseModule) return; // 新增模块整体呈现
+    const baseStepMap = new Map(baseModule.steps.map((step) => [step.id, step]));
+    const targetStepMap = new Map(targetModule.steps.map((step) => [step.id, step]));
+
+    targetModule.steps.forEach((targetStep, targetIndex) => {
+      const baseStep = baseStepMap.get(targetStep.id);
+      if (!baseStep) {
+        steps.push({ moduleId: targetModule.id, moduleTitle: targetModule.title, stepId: targetStep.id, title: targetStep.title, kind: 'added', fields: [] });
+        return;
+      }
+      const fields: FieldChange[] = [];
+      for (const { field, label } of STEP_FIELD_LABELS) {
+        const beforeValue = formatStepValue(field, base.modules, baseStep[field]);
+        const afterValue = formatStepValue(field, target.modules, targetStep[field]);
+        if (beforeValue !== afterValue) fields.push({ field, label, before: beforeValue, after: afterValue });
+      }
+      const baseIndex = baseModule.steps.findIndex((step) => step.id === targetStep.id);
+      if (baseIndex !== targetIndex) {
+        fields.push({ field: 'order', label: '步骤顺序', before: `第 ${baseIndex + 1} 步`, after: `第 ${targetIndex + 1} 步` });
+      }
+      if (fields.length) {
+        steps.push({ moduleId: targetModule.id, moduleTitle: targetModule.title, stepId: targetStep.id, title: targetStep.title, kind: 'changed', fields });
+      }
+    });
+
+    baseModule.steps.forEach((baseStep) => {
+      if (!targetStepMap.has(baseStep.id)) {
+        steps.push({ moduleId: targetModule.id, moduleTitle: targetModule.title, stepId: baseStep.id, title: baseStep.title, kind: 'missing', fields: [] });
+      }
+    });
+  });
+
+  const addedStepCount = steps.filter((step) => step.kind === 'added').length + addedModules.reduce((sum, module) => sum + module.stepCount, 0);
+  const missingStepCount = steps.filter((step) => step.kind === 'missing').length + missingModules.reduce((sum, module) => sum + module.stepCount, 0);
+  const changedStepCount = steps.filter((step) => step.kind === 'changed').length;
+
+  return {
+    addedModules,
+    missingModules,
+    steps,
+    addedStepCount,
+    missingStepCount,
+    changedStepCount,
+    empty: addedModules.length === 0 && missingModules.length === 0 && steps.length === 0,
+  };
+}
+
+/**
+ * 从旧版本恢复：以快照内容创建一份新的草稿，历史冻结版本全部保留。
+ * 恢复后优先沿用仍存在的模块和步骤选中状态，找不到则回退到快照选择。
+ */
+export function restoreProjectFromVersion(project: CourseProject, versionId: string): CourseProject {
+  const snapshot = getVersionSnapshot(project, versionId);
+  const selectedModuleId = snapshot.modules.some((module) => module.id === project.selectedModuleId)
+    ? project.selectedModuleId
+    : (snapshot.selectedModuleId && snapshot.modules.some((module) => module.id === snapshot.selectedModuleId)
+      ? snapshot.selectedModuleId
+      : snapshot.modules[0]?.id ?? '');
+  const selectedModule = snapshot.modules.find((module) => module.id === selectedModuleId);
+  const selectedStepId = selectedModule?.steps.some((step) => step.id === project.selectedStepId)
+    ? project.selectedStepId
+    : (selectedModule?.steps.some((step) => step.id === snapshot.selectedStepId)
+      ? snapshot.selectedStepId
+      : selectedModule?.steps[0]?.id ?? '');
+
+  return {
+    ...structuredClone(snapshot),
+    status: 'draft',
+    frozenVersions: structuredClone(project.frozenVersions),
+    selectedModuleId,
+    selectedStepId,
+    lastSavedAt: new Date().toISOString(),
+    revision: project.revision + 1,
+  };
 }

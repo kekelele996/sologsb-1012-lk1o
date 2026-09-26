@@ -1,0 +1,1 @@
+import{r as o,d as s,h as r,H as i}from"./p-B13Uw5EO.js";const t=class{constructor(s){o(this,s)}render(){const o=s(this);return r(i,{key:"d24ee9c70a99d11b7d95dfb4a8066670bdfcbc1d",role:"group",class:{[o]:!0,[`item-group-${o}`]:!0,item:!0}})}};t.style={ios:"ion-item-group{display:block}",md:"ion-item-group{display:block}"};export{t as ion_item_group}

@@ -1,0 +1,5 @@
+import{m as a}from"./p-Cd68SsYv.js";
+/*!
+ * (C) Ionic http://ionicframework.com - MIT License
+ */
+const s=async s=>{const t=await a.get(s);return!(!t||!await t.isActive())};export{s as u}
