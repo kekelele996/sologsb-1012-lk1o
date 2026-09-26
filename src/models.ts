@@ -63,6 +63,42 @@ export interface ValidationCheck {
   moduleId?: string;
 }
 
+export type CourseSnapshot = Omit<CourseProject, 'frozenVersions'>;
+
+export interface FieldChange {
+  field: string;
+  before: string;
+  after: string;
+}
+
+export interface DiffModuleEntry {
+  id: string;
+  title: string;
+}
+
+export interface DiffStepEntry {
+  id: string;
+  title: string;
+  kind: LessonStep['kind'];
+  moduleId: string;
+  moduleTitle: string;
+  index: number;
+}
+
+export interface ChangedEntry<T> {
+  entry: T;
+  changes: FieldChange[];
+}
+
+export interface VersionDiff {
+  addedModules: DiffModuleEntry[];
+  removedModules: DiffModuleEntry[];
+  changedModules: ChangedEntry<DiffModuleEntry>[];
+  addedSteps: DiffStepEntry[];
+  removedSteps: DiffStepEntry[];
+  changedSteps: ChangedEntry<DiffStepEntry>[];
+}
+
 export const STORAGE_KEY = 'sologsb-1012-sign-course-project-v1';
 
 export function createDemoProject(): CourseProject {
@@ -253,4 +289,120 @@ export function validateProject(project: CourseProject): ValidationCheck[] {
 
 export function cloneProject(project: CourseProject): CourseProject {
   return structuredClone(project);
+}
+
+export function versionStats(version: FrozenVersion): { modules: number; steps: number } {
+  return {
+    modules: version.snapshot.modules.length,
+    steps: version.snapshot.modules.reduce((sum, module) => sum + module.steps.length, 0),
+  };
+}
+
+const STEP_DIFF_FIELDS: { field: keyof LessonStep; label: string }[] = [
+  { field: 'title', label: '步骤标题' },
+  { field: 'kind', label: '步骤类型' },
+  { field: 'difficulty', label: '难度标签' },
+  { field: 'duration', label: '预计时长' },
+  { field: 'demoTitle', label: '示范片段名称' },
+  { field: 'demoUrl', label: '素材地址' },
+  { field: 'handshape', label: '手形说明' },
+  { field: 'gestureZone', label: '主要手形区域' },
+  { field: 'camera', label: '镜头角度' },
+  { field: 'caption', label: '步骤字幕' },
+  { field: 'captionPosition', label: '字幕位置' },
+  { field: 'altText', label: '替代文本' },
+  { field: 'prerequisiteId', label: '前置条件' },
+  { field: 'cuePoints', label: '检查点' },
+  { field: 'commonMistakes', label: '常见错误' },
+  { field: 'exercise', label: '练习任务' },
+  { field: 'exerciseFeedback', label: '练习反馈' },
+];
+
+function rawFieldValue(step: LessonStep, field: keyof LessonStep): string {
+  const value = step[field];
+  return Array.isArray(value) ? value.join('\n') : String(value ?? '');
+}
+
+function displayFieldValue(step: LessonStep, field: keyof LessonStep, snapshot: CourseSnapshot): string {
+  const value = step[field];
+  if (field === 'duration') return `${String(value)} 秒`;
+  if (field === 'cuePoints') return (value as number[]).length ? `${(value as number[]).join('、')} 秒` : '（空）';
+  if (field === 'commonMistakes') {
+    const mistakes = (value as string[]).filter(Boolean);
+    return mistakes.length ? mistakes.join('；') : '（空）';
+  }
+  if (field === 'prerequisiteId') {
+    if (!value) return '无前置条件';
+    const target = snapshot.modules.flatMap((module) => module.steps).find((candidate) => candidate.id === value);
+    return target ? target.title : '（已不存在的步骤）';
+  }
+  const text = String(value ?? '').trim();
+  return text || '（空）';
+}
+
+function locateSteps(snapshot: CourseSnapshot): { entry: DiffStepEntry; step: LessonStep }[] {
+  return snapshot.modules.flatMap((module) =>
+    module.steps.map((step, index) => ({
+      entry: { id: step.id, title: step.title, kind: step.kind, moduleId: module.id, moduleTitle: module.title, index },
+      step,
+    })),
+  );
+}
+
+export function diffVersions(base: CourseSnapshot, target: CourseSnapshot): VersionDiff {
+  const baseModules = new Map(base.modules.map((module) => [module.id, module]));
+  const targetModules = new Map(target.modules.map((module) => [module.id, module]));
+
+  const addedModules = target.modules
+    .filter((module) => !baseModules.has(module.id))
+    .map((module) => ({ id: module.id, title: module.title }));
+  const removedModules = base.modules
+    .filter((module) => !targetModules.has(module.id))
+    .map((module) => ({ id: module.id, title: module.title }));
+  const changedModules = target.modules
+    .filter((module) => baseModules.has(module.id))
+    .map((module) => {
+      const before = baseModules.get(module.id)!;
+      const changes: FieldChange[] = [];
+      if (before.title !== module.title) changes.push({ field: '模块标题', before: before.title || '（空）', after: module.title || '（空）' });
+      if (before.summary !== module.summary) changes.push({ field: '模块目标', before: before.summary || '（空）', after: module.summary || '（空）' });
+      if (before.color !== module.color) changes.push({ field: '主题色', before: before.color, after: module.color });
+      return { entry: { id: module.id, title: module.title }, changes };
+    })
+    .filter((item) => item.changes.length > 0);
+
+  const baseSteps = new Map(locateSteps(base).map((item) => [item.entry.id, item]));
+  const targetSteps = new Map(locateSteps(target).map((item) => [item.entry.id, item]));
+
+  const addedSteps = [...targetSteps.values()].filter((item) => !baseSteps.has(item.entry.id)).map((item) => item.entry);
+  const removedSteps = [...baseSteps.values()].filter((item) => !targetSteps.has(item.entry.id)).map((item) => item.entry);
+  const changedSteps = [...targetSteps.values()]
+    .filter((item) => baseSteps.has(item.entry.id))
+    .map((item) => {
+      const before = baseSteps.get(item.entry.id)!;
+      const changes: FieldChange[] = [];
+      if (before.entry.moduleId !== item.entry.moduleId) {
+        changes.push({ field: '所在模块', before: before.entry.moduleTitle, after: item.entry.moduleTitle });
+      }
+      STEP_DIFF_FIELDS.forEach(({ field, label }) => {
+        if (rawFieldValue(before.step, field) !== rawFieldValue(item.step, field)) {
+          changes.push({ field: label, before: displayFieldValue(before.step, field, base), after: displayFieldValue(item.step, field, target) });
+        }
+      });
+      return { entry: item.entry, changes };
+    })
+    .filter((item) => item.changes.length > 0);
+
+  return { addedModules, removedModules, changedModules, addedSteps, removedSteps, changedSteps };
+}
+
+export function isDiffEmpty(diff: VersionDiff): boolean {
+  return (
+    diff.addedModules.length +
+    diff.removedModules.length +
+    diff.changedModules.length +
+    diff.addedSteps.length +
+    diff.removedSteps.length +
+    diff.changedSteps.length === 0
+  );
 }

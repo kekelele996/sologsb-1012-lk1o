@@ -1,0 +1,4 @@
+import{r as i,h as r,H as s,e as t}from"./p-B13Uw5EO.js";
+/*!
+ * (C) Ionic http://ionicframework.com - MIT License
+ */const e=class{constructor(r){i(this,r),this.routerDirection="forward",this.onClick=()=>((i,r,s,t,e)=>{const n=this.el.closest("ion-nav");if(n)if("forward"===r){if(void 0!==s)return n.push(s,t,{skipIfBusy:!0,animationBuilder:e})}else if("root"===r){if(void 0!==s)return n.setRoot(s,t,{skipIfBusy:!0,animationBuilder:e})}else if("back"===r)return n.pop({skipIfBusy:!0,animationBuilder:e});return Promise.resolve(!1)})(0,this.routerDirection,this.component,this.componentProps,this.routerAnimation)}render(){return r(s,{key:"4bcaa74015462824b3f19253b04a77ce83389ca0",onClick:this.onClick})}get el(){return t(this)}};export{e as ion_nav_link}

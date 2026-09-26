@@ -1,0 +1,4 @@
+import{j as t,p as o,w as n}from"./p-DXHPjXmM.js";
+/*!
+ * (C) Ionic http://ionicframework.com - MIT License
+ */const s=(o,s,e,r=[])=>{let i,a=t(o,s);const c=s.filter((t=>!r.includes(t))),u=new Set,l=(t,o)=>{null===o?u.delete(t):u.add(t)},b=()=>{void 0===i&&0!==c.length&&void 0!==n&&"MutationObserver"in n&&((()=>{const t={};for(const n of c){const s=o.getAttribute(n),e=u.has(n);l(n,s),null===s&&!e||s===a[n]||(t[n]=s)}Object.keys(t).length>0&&(a={...a,...t},e())})(),i=new MutationObserver((t=>{const n={};for(const s of t){const t=s.attributeName,e=o.getAttribute(t);l(t,e),n[t]=e}a={...a,...n},e()})),i.observe(o,{attributeFilter:c}))};return b(),{get attributes(){return a},init:b,destroy:()=>{i?.disconnect(),i=void 0}}},e=(t,n,e=[])=>s(t,o,n,e);export{s as a,e as c}

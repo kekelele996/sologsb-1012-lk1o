@@ -1,0 +1,4 @@
+import{w as t}from"./p-ZjP4CjeZ.js";import{i as o,a as r}from"./p-C5rwiqSd.js";
+/*!
+ * (C) Ionic http://ionicframework.com - MIT License
+ */const s=(r,s,e,n=[])=>{let i,a=o(r,s);const c=s.filter((t=>!n.includes(t))),u=new Set,f=(t,o)=>{null===o?u.delete(t):u.add(t)},l=()=>{void 0===i&&0!==c.length&&void 0!==t&&"MutationObserver"in t&&((()=>{const t={};for(const o of c){const s=r.getAttribute(o),e=u.has(o);f(o,s),null===s&&!e||s===a[o]||(t[o]=s)}Object.keys(t).length>0&&(a={...a,...t},e())})(),i=new MutationObserver((t=>{const o={};for(const s of t){const t=s.attributeName,e=r.getAttribute(t);f(t,e),o[t]=e}a={...a,...o},e()})),i.observe(r,{attributeFilter:c}))};return l(),{get attributes(){return a},init:l,destroy:()=>{i?.disconnect(),i=void 0}}},e=(t,o,e=[])=>s(t,r,o,e);export{e as a,s as c}

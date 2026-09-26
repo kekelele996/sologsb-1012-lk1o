@@ -2,15 +2,22 @@ import { Component, Host, State, h, Listen } from '@stencil/core';
 import {
   cloneProject,
   createDemoProject,
+  diffVersions,
+  isDiffEmpty,
   selectedModule,
   selectedStep,
   STORAGE_KEY,
   validateProject,
+  versionStats,
   type CameraAngle,
   type CaptionPosition,
+  type ChangedEntry,
   type CourseModule,
   type CourseProject,
   type Difficulty,
+  type DiffModuleEntry,
+  type DiffStepEntry,
+  type FrozenVersion,
   type GestureZone,
   type LessonStep,
   type ValidationCheck,
@@ -26,7 +33,9 @@ type PreviewSize = 'phone' | 'tablet';
 export class AppRoot {
   @State() project: CourseProject = createDemoProject();
   @State() previewSize: PreviewSize = 'phone';
-  @State() activePanel: 'editor' | 'checks' = 'editor';
+  @State() activePanel: 'editor' | 'checks' | 'versions' = 'editor';
+  @State() compareBaseId = '';
+  @State() compareTargetId = '';
   @State() playing = false;
   @State() playProgress = 0;
   @State() offline = typeof navigator !== 'undefined' ? !navigator.onLine : false;
@@ -308,6 +317,47 @@ export class AppRoot {
     this.commit((draft) => ({ ...draft, status: 'draft' }), '已创建修订版，可继续编辑。');
   }
 
+  private get compareBase(): FrozenVersion | undefined {
+    const versions = this.project.frozenVersions;
+    return versions.find((version) => version.id === this.compareBaseId) ?? versions[1];
+  }
+
+  private get compareTarget(): FrozenVersion | undefined {
+    const versions = this.project.frozenVersions;
+    return versions.find((version) => version.id === this.compareTargetId) ?? versions[0];
+  }
+
+  private restoreVersion(version: FrozenVersion): void {
+    const confirmed = window.confirm(
+      `将基于「${version.label}」创建一份新的草稿继续编辑。\n\n· 已冻结的 ${this.project.frozenVersions.length} 个版本全部保留，不会覆盖历史记录\n· 当前未冻结的修改会被替换（可用 ⌘/Ctrl + Z 撤销）`,
+    );
+    if (!confirmed) return;
+    const before = cloneProject(this.project);
+    const snapshot = structuredClone(version.snapshot);
+    const selectedModuleId = snapshot.modules.some((module) => module.id === snapshot.selectedModuleId)
+      ? snapshot.selectedModuleId
+      : snapshot.modules[0]?.id ?? '';
+    const module = snapshot.modules.find((item) => item.id === selectedModuleId);
+    const selectedStepId = module?.steps.some((step) => step.id === snapshot.selectedStepId)
+      ? snapshot.selectedStepId
+      : module?.steps[0]?.id ?? '';
+    this.past = [...this.past, before].slice(-80);
+    this.future = [];
+    this.project = {
+      ...snapshot,
+      status: 'draft',
+      selectedModuleId,
+      selectedStepId,
+      frozenVersions: structuredClone(this.project.frozenVersions),
+      revision: before.revision + 1,
+      lastSavedAt: new Date().toISOString(),
+    };
+    this.persist();
+    this.playing = false;
+    this.activePanel = 'editor';
+    this.showToast('success', `已基于「${version.label}」创建新草稿，历史版本保持不变。`);
+  }
+
   private togglePlay(): void {
     if (this.playTimer) {
       window.clearInterval(this.playTimer);
@@ -330,6 +380,10 @@ export class AppRoot {
 
   private formatDate(value: string): string {
     return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
+  }
+
+  private formatDateTime(value: string): string {
+    return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
   }
 
   private renderStatusBadge() {
@@ -387,8 +441,11 @@ export class AppRoot {
 
         {frozen && (
           <div class="frozen-callout">
-            <div><strong>此版本已冻结</strong><span>字段已锁定，仍可预览和运行检查。</span></div>
-            <ion-button size="small" class="studio-button" onClick={() => this.reviseFrozen()}>创建修订版</ion-button>
+            <div><strong>此版本已冻结</strong><span>字段已锁定，仍可预览和运行检查；可在版本中心比较历史版本或恢复旧版本。</span></div>
+            <div class="frozen-actions">
+              <ion-button size="small" fill="outline" class="studio-button" onClick={() => { this.activePanel = 'versions'; }}>版本中心</ion-button>
+              <ion-button size="small" class="studio-button" onClick={() => this.reviseFrozen()}>创建修订版</ion-button>
+            </div>
           </div>
         )}
 
@@ -540,6 +597,199 @@ export class AppRoot {
     );
   }
 
+  private renderStepDiffItem(entry: DiffStepEntry, tone: 'added' | 'removed', mark: string) {
+    return (
+      <div class={`diff-item ${tone}`} key={`${tone}-${entry.id}`}>
+        <span class="diff-mark">{mark}</span>
+        <span class="diff-copy">
+          <strong>{entry.title}</strong>
+          <small>{entry.moduleTitle} · 第 {entry.index + 1} 步 · {entry.kind}</small>
+        </span>
+      </div>
+    );
+  }
+
+  private renderChangedStepItem(item: ChangedEntry<DiffStepEntry>) {
+    return (
+      <div class="diff-item changed" key={`changed-${item.entry.id}`}>
+        <span class="diff-mark">±</span>
+        <span class="diff-copy">
+          <strong>{item.entry.title}</strong>
+          <small>{item.entry.moduleTitle} · 第 {item.entry.index + 1} 步 · {item.changes.length} 个字段变化</small>
+          <ul class="field-changes">
+            {item.changes.map((change) => (
+              <li key={change.field}>
+                <em>{change.field}</em>
+                <span class="change-values"><del>{change.before}</del><i>→</i><ins>{change.after}</ins></span>
+              </li>
+            ))}
+          </ul>
+        </span>
+      </div>
+    );
+  }
+
+  private renderModuleDiffItem(item: ChangedEntry<DiffModuleEntry>, tone: 'added' | 'removed' | 'changed') {
+    const mark = tone === 'added' ? '＋' : tone === 'removed' ? '－' : '±';
+    return (
+      <div class={`diff-item ${tone}`} key={`${tone}-module-${item.entry.id}`}>
+        <span class="diff-mark">{mark}</span>
+        <span class="diff-copy">
+          <strong>{item.entry.title}</strong>
+          <small>{tone === 'added' ? '对比版本新增的模块' : tone === 'removed' ? '对比版本中已不存在的模块' : `${item.changes.length} 个字段变化`}</small>
+          {item.changes.length > 0 && (
+            <ul class="field-changes">
+              {item.changes.map((change) => (
+                <li key={change.field}>
+                  <em>{change.field}</em>
+                  <span class="change-values"><del>{change.before}</del><i>→</i><ins>{change.after}</ins></span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </span>
+      </div>
+    );
+  }
+
+  private renderDiffResult(base: FrozenVersion, target: FrozenVersion) {
+    const diff = diffVersions(base.snapshot, target.snapshot);
+    if (isDiffEmpty(diff)) {
+      return (
+        <div class="all-clear">
+          <strong>✓ 两个版本内容一致</strong>
+          <p>「{base.label}」与「{target.label}」的模块和步骤没有新增、缺失或字段变化。</p>
+        </div>
+      );
+    }
+    const added = diff.addedModules.length + diff.addedSteps.length;
+    const removed = diff.removedModules.length + diff.removedSteps.length;
+    const changed = diff.changedModules.length + diff.changedSteps.length;
+    const moduleChanges = diff.addedModules.length + diff.removedModules.length + diff.changedModules.length;
+    return (
+      <div class="diff-result">
+        <div class="diff-summary">
+          <span class="diff-chip added">＋ {added} 项新增</span>
+          <span class="diff-chip removed">－ {removed} 项缺失</span>
+          <span class="diff-chip changed">± {changed} 项变更</span>
+        </div>
+        <p class="diff-note">以「{base.label}」为基准对比「{target.label}」：新增指对比版本独有的内容，缺失指基准版本有而对比版本没有的内容。</p>
+
+        {moduleChanges > 0 && (
+          <div class="diff-group">
+            <h3>模块变化 · {moduleChanges}</h3>
+            {diff.addedModules.map((entry) => this.renderModuleDiffItem({ entry, changes: [] }, 'added'))}
+            {diff.removedModules.map((entry) => this.renderModuleDiffItem({ entry, changes: [] }, 'removed'))}
+            {diff.changedModules.map((item) => this.renderModuleDiffItem(item, 'changed'))}
+          </div>
+        )}
+
+        {diff.addedSteps.length > 0 && (
+          <div class="diff-group">
+            <h3>新增步骤 · {diff.addedSteps.length}</h3>
+            {diff.addedSteps.map((entry) => this.renderStepDiffItem(entry, 'added', '＋'))}
+          </div>
+        )}
+
+        {diff.removedSteps.length > 0 && (
+          <div class="diff-group">
+            <h3>缺失步骤 · {diff.removedSteps.length}</h3>
+            {diff.removedSteps.map((entry) => this.renderStepDiffItem(entry, 'removed', '－'))}
+          </div>
+        )}
+
+        {diff.changedSteps.length > 0 && (
+          <div class="diff-group">
+            <h3>字段变化 · {diff.changedSteps.length} 个步骤</h3>
+            {diff.changedSteps.map((item) => this.renderChangedStepItem(item))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  private renderVersionCompare() {
+    const versions = this.project.frozenVersions;
+    if (versions.length < 2) {
+      return (
+        <div class="version-hint">
+          <strong>还需要一个版本才能比较</strong>
+          <p>当前只有 {versions.length} 个冻结版本，再冻结一个版本后，即可比较两个版本之间的新增、缺失和字段变化。</p>
+        </div>
+      );
+    }
+    const base = this.compareBase;
+    const target = this.compareTarget;
+    return (
+      <div>
+        <div class="compare-controls">
+          <ion-select label="基准版本" labelPlacement="stacked" class="studio-input" value={base?.id} onIonChange={(event) => { this.compareBaseId = event.detail.value as string; }}>
+            {versions.map((version) => <ion-select-option value={version.id}>{version.label} · {this.formatDateTime(version.createdAt)}</ion-select-option>)}
+          </ion-select>
+          <span class="compare-arrow">→</span>
+          <ion-select label="对比版本" labelPlacement="stacked" class="studio-input" value={target?.id} onIonChange={(event) => { this.compareTargetId = event.detail.value as string; }}>
+            {versions.map((version) => <ion-select-option value={version.id}>{version.label} · {this.formatDateTime(version.createdAt)}</ion-select-option>)}
+          </ion-select>
+        </div>
+        {base && target && base.id !== target.id
+          ? this.renderDiffResult(base, target)
+          : (
+            <div class="version-hint">
+              <strong>请选择两个不同的版本</strong>
+              <p>基准版本和对比版本相同，调整任意一侧即可查看差异。</p>
+            </div>
+          )}
+      </div>
+    );
+  }
+
+  private renderVersions() {
+    const versions = this.project.frozenVersions;
+    if (versions.length === 0) {
+      return (
+        <section class="versions-panel">
+          <div class="empty-versions">
+            <div class="empty-glyph">版</div>
+            <h2>还没有冻结版本</h2>
+            <p>通过「提交复核 → 冻结版本」创建第一个课程快照。冻结后，这里会列出每个版本的时间、模块与步骤总数，支持任选两个版本比较差异，并把旧版本恢复为新草稿继续编辑。</p>
+          </div>
+        </section>
+      );
+    }
+    return (
+      <section class="versions-panel">
+        <div class="versions-intro">
+          <span class="eyebrow">版本中心</span>
+          <h2>冻结历史与版本比较</h2>
+          <p>共 {versions.length} 个冻结版本 · 恢复旧版本会创建新草稿，不会覆盖任何历史记录。</p>
+        </div>
+        <div class="version-list">
+          {versions.map((version) => {
+            const stats = versionStats(version);
+            const isCurrent = this.project.status === 'frozen' && version.id === versions[0]?.id;
+            return (
+              <article class="version-card" key={version.id}>
+                <div class="version-main">
+                  <strong>{version.label}{isCurrent && <em class="current-tag">当前</em>}</strong>
+                  <span>冻结于 {this.formatDateTime(version.createdAt)}</span>
+                </div>
+                <div class="version-stats">
+                  <div><strong>{stats.modules}</strong><span>模块</span></div>
+                  <div><strong>{stats.steps}</strong><span>步骤</span></div>
+                </div>
+                <ion-button size="small" fill="outline" class="studio-button" onClick={() => this.restoreVersion(version)}>恢复为草稿</ion-button>
+              </article>
+            );
+          })}
+        </div>
+        <div class="compare-section">
+          <div class="section-title"><span>⇄</span><div><h2>版本比较</h2><p>任选两个版本，查看新增、缺失和字段变化涉及的步骤</p></div></div>
+          {this.renderVersionCompare()}
+        </div>
+      </section>
+    );
+  }
+
   render() {
     const module = this.currentModule;
     const errors = this.checks.filter((check) => check.severity === 'error').length;
@@ -609,8 +859,9 @@ export class AppRoot {
                 <div class="panel-switcher">
                   <button class={this.activePanel === 'editor' ? 'active' : ''} onClick={() => { this.activePanel = 'editor'; }}>步骤编排</button>
                   <button class={this.activePanel === 'checks' ? 'active' : ''} onClick={() => { this.activePanel = 'checks'; }}>发布前检查 <span>{this.checks.length}</span></button>
+                  <button class={this.activePanel === 'versions' ? 'active' : ''} onClick={() => { this.activePanel = 'versions'; }}>版本中心 <span>{this.project.frozenVersions.length}</span></button>
                 </div>
-                <div class="editor-scroll">{this.activePanel === 'editor' ? this.renderStepEditor() : this.renderChecks()}</div>
+                <div class="editor-scroll">{this.activePanel === 'editor' ? this.renderStepEditor() : this.activePanel === 'checks' ? this.renderChecks() : this.renderVersions()}</div>
               </section>
 
               {this.renderPreview()}
